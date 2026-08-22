@@ -1,16 +1,17 @@
 version: '3.8'
+
 services:
   postgres:
     image: postgres:16-alpine
     container_name: maxicajero_db_local
+    restart: always
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: secretpassword
       POSTGRES_DB: maxicajero_cloud
-    ports:
-      - "5432:5432"
+    network_mode: "host" # <--- Esto evita la creación de redes virtuales veth
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
 
 volumes:
-  postgres_data:
+  pgdata:

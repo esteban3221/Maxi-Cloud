@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken';
 import { OAuth2Client } from 'google-auth-library';
 
 const app = express();
+app.use(express.json());
 
 const allowedOrigins = [
   'http://localhost:5173', // Puerto común para Vite / React
@@ -112,8 +113,55 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+export const googleLogin = async (req: Request, res: Response) => {
+  const { idToken } = req.body;
+
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+    if (!payload || !payload.email) {
+      return res.status(400).json({ error: 'Token de Google inválido' });
+    }
+
+    const { email, name } = payload;
+
+    // Buscar o crear usuario en Prisma
+    let user = await prisma.user.findUnique({ where: { email } });
+
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          email,
+          name: name || 'Usuario Google',
+          password: '', // Sin contraseña física
+          role: 'ADMIN',
+        },
+      });
+    }
+
+    // Generar JWT del sistema
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET!,
+      { expiresIn: '24h' }
+    );
+
+    return res.json({
+      message: 'Autenticación con Google exitosa',
+      token,
+      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+    });
+  } catch (error) {
+    return res.status(401).json({ error: 'Error al verificar token con Google' });
+  }
+};
+
 
 app.post('/api/auth/google', async (req, res) => {
   try {
@@ -161,9 +209,17 @@ app.post('/api/auth/google', async (req, res) => {
       });
     }
 
-    // 3. Responder con los datos del usuario (o tu propio JWT)
+    // 3. Generar tu propio Token JWT (asegúrate de usar la misma llave secreta que en tu login normal)
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET || 'tu_secreto_jwt', // Usa tu variable de entorno
+      { expiresIn: '7d' } // El tiempo que consideres prudente
+    );
+
+    // 4. Responder con el token y los datos del usuario
     res.status(200).json({
       message: 'Autenticación con Google exitosa',
+      token, // <-- ¡Esto era lo que faltaba enviar!
       user: {
         id: user.id,
         name: user.name,
@@ -273,63 +329,136 @@ app.get('/api/auth/me', authenticateJWT, async (req: AuthenticatedRequest, res: 
 // ==========================================
 // REGISTRO DE DISPOSITIVOS (CLOUD)
 // ==========================================
-app.post('/api/devices/register', async (req, res) => {
-  try {
-    const masterKey = req.headers['x-master-key'];
-    const expectedMasterKey = process.env.MASTER_REGISTRATION_KEY;
 
-    if (!masterKey || masterKey !== expectedMasterKey) {
-      res.status(401).json({ error: 'Acceso denegado: Clave Maestra de registro inválida' });
-      return;
-    }
+// Almacén temporal en memoria para los códigos de vinculación activos
+interface PairingSession {
+  uuid: string;
+  status: 'PENDING' | 'CLAIMED' | 'EXPIRED';
+  apiKey?: string;
+  expiresAt: number;
+}
 
-    const { uuid, name } = req.body;
+const pairingSessions = new Map<string, PairingSession>();
 
-    if (!uuid || !name) {
-      res.status(400).json({ error: 'Faltan campos obligatorios: "uuid" y "name"' });
-      return;
-    }
+// 1. POS solicita iniciar vinculación (Genera pairingCode de 6 caracteres)
+app.post('/api/devices/init-pair', (req, res) => {
+  const { uuid } = req.body;
+  if (!uuid) {
+    res.status(400).json({ error: 'El campo "uuid" es requerido' });
+    return;
+  }
 
-    const existingDevice = await prisma.device.findUnique({
-      where: { uuid }
+  // Generar código único de 6 caracteres (Ej: A3F89C)
+  const pairingCode = crypto.randomBytes(3).toString('hex').toUpperCase();
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutos de vigencia
+
+  pairingSessions.set(pairingCode, {
+    uuid,
+    status: 'PENDING',
+    expiresAt,
+  });
+
+  const frontendUrl = `http://localhost:5173`;
+
+  res.json({
+    pairingCode,
+    qrUrl: `${frontendUrl}/pair?code=${pairingCode}`,
+    expiresInSeconds: 600
+  });
+});
+
+// 2. POS hace Polling para verificar si el Dashboard ya aceptó
+app.get('/api/devices/pair-status/:code', (req, res) => {
+  const { code } = req.params;
+  const session = pairingSessions.get(code);
+
+  if (!session) {
+    res.status(404).json({ error: 'Código de vinculación no encontrado' });
+    return;
+  }
+
+  if (Date.now() > session.expiresAt) {
+    session.status = 'EXPIRED';
+    res.json({ status: 'EXPIRED' });
+    return;
+  }
+
+  if (session.status === 'CLAIMED') {
+    res.json({
+      status: 'CLAIMED',
+      apiKey: session.apiKey,
     });
+    // Limpiar sesión usada
+    pairingSessions.delete(code);
+    return;
+  }
 
-    if (existingDevice) {
-      res.status(409).json({
-        error: 'El dispositivo con este UUID ya está registrado',
-        deviceId: existingDevice.id
-      });
+  res.json({ status: 'PENDING' });
+});
+
+app.post('/api/devices/claim', async (req, res) => {
+  try {
+    console.log('--- INTENTO DE VINCULACIÓN RECIBIDO ---');
+    console.log('Body completo:', req.body);
+    console.log('Códigos activos actualmente en memoria:', Array.from(pairingSessions.keys()));
+
+    const { pairingCode, name } = req.body;
+
+    if (!pairingCode || !name) {
+      res.status(400).json({ error: 'Se requieren "pairingCode" y "name"' });
       return;
     }
 
+    // Asegurar limpieza de espacios y mayúsculas
+    const cleanCode = pairingCode.trim().toUpperCase();
+    const session = pairingSessions.get(cleanCode);
+
+    if (!session) {
+      console.log(`[Error] El código "${cleanCode}" NO existe en el mapa de sesiones.`);
+      res.status(400).json({ error: 'Código de vinculación inválido o no encontrado.' });
+      return;
+    }
+
+    if (Date.now() > session.expiresAt) {
+      console.log(`[Error] El código "${cleanCode}" ya expiró.`);
+      pairingSessions.delete(cleanCode);
+      res.status(400).json({ error: 'El código de vinculación ha expirado.' });
+      return;
+    }
+
+    // Generar API Key única para el cajero
     const generatedApiKey = `mc_live_${crypto.randomBytes(24).toString('hex')}`;
 
-    const newDevice = await prisma.device.create({
-      data: {
-        uuid,
+    // Crear o actualizar en Prisma
+    const device = await prisma.device.upsert({
+      where: { uuid: session.uuid },
+      update: {
+        name,
+        apiKey: generatedApiKey,
+        active: true
+      },
+      create: {
+        uuid: session.uuid,
         name,
         apiKey: generatedApiKey,
         active: true
       }
     });
 
-    res.status(201).json({
-      message: 'Cajero registrado e inicializado con éxito',
-      device: {
-        id: newDevice.id,
-        uuid: newDevice.uuid,
-        name: newDevice.name,
-        apiKey: newDevice.apiKey
-      }
+    // Marcar la sesión como reclamada para que el POS se entere en su siguiente polling
+    session.status = 'CLAIMED';
+    session.apiKey = generatedApiKey;
+
+    console.log(`¡Dispositivo "${name}" vinculado exitosamente con UUID: ${session.uuid}!`);
+
+    res.json({
+      message: 'Dispositivo vinculado exitosamente',
+      device: { id: device.id, name: device.name, uuid: device.uuid }
     });
 
   } catch (error: any) {
-    console.error('Error al registrar dispositivo:', error);
-    // 2. Muestra el mensaje de error real si ocurre un fallo
-    res.status(500).json({
-      error: 'Error interno del servidor al procesar el registro',
-      details: error?.message || error
-    });
+    console.error('Error interno en /api/devices/claim:', error);
+    res.status(500).json({ error: 'Error interno al vincular dispositivo', details: error?.message });
   }
 });
 
@@ -362,49 +491,138 @@ app.get('/api/devices', authenticateJWT, async (req: AuthenticatedRequest, res: 
   }
 });
 
-// 2. Obtener el historial de Logs con filtros y paginación
-app.get('/api/logs', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+
+
+// ==========================================
+// RUTA PARA RECEPCIÓN DE LOGS DESDE EL POS (C++)
+// ==========================================
+app.get('/api/logs', async (req: Request, res: Response) => {
   try {
-    const { deviceId, tipo, estatus, page = '1', limit = '20' } = req.query;
+    // 1. Extraer parámetros de paginación de la URL (por defecto página 1, 10 items)
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 10;
+    const skip = (page - 1) * limit;
 
-    const pageNum = Math.max(1, parseInt(page as string, 10) || 1);
-    const limitNum = Math.max(1, parseInt(limit as string, 10) || 20);
-    const skip = (pageNum - 1) * limitNum;
+    // 2. Extraer parámetros de los filtros (Cajero, Tipo, Estatus)
+    const { deviceId, tipo, estatus } = req.query;
 
-    // Filtros dinámicos opcionales
+    // 3. Construir el objeto de búsqueda (WHERE) de Prisma dinámicamente
     const where: any = {};
     if (deviceId) where.deviceId = String(deviceId);
     if (tipo) where.tipo = String(tipo);
     if (estatus) where.estatus = String(estatus);
 
-    // Consulta paralela: datos + conteo total para paginación
-    const [logs, total] = await Promise.all([
-      prisma.log.findMany({
-        where,
-        include: {
-          device: {
-            select: { name: true, uuid: true } // Incluye datos del cajero que generó el log
-          }
-        },
-        orderBy: { fecha: 'desc' },
-        skip,
-        take: limitNum
-      }),
-      prisma.log.count({ where })
-    ]);
+    // 4. Contar el total de registros para que funcione la paginación en React
+    const total = await prisma.log.count({ where });
 
-    res.status(200).json({
+    // 5. Consultar los logs en la base de datos
+    const logs = await prisma.log.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { fecha: 'desc' }, // Los más recientes primero
+      include: {
+        device: {
+          select: { name: true, uuid: true } // Traemos el nombre del cajero para la UI
+        }
+      }
+    });
+
+    // 6. Responder exactamente con la estructura que tu Frontend (LogsResponse) espera
+    res.json({
+      logs,
       pagination: {
         total,
-        page: pageNum,
-        limit: limitNum,
-        totalPages: Math.ceil(total / limitNum)
-      },
-      logs
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1
+      }
     });
+
   } catch (error) {
-    console.error('Error al obtener logs:', error);
-    res.status(500).json({ error: 'Error al consultar el historial de transacciones' });
+    console.error('Error al consultar los logs:', error);
+    res.status(500).json({ error: 'Error interno al obtener el historial de logs' });
+  }
+});
+
+app.post('/api/logs', async (req: Request, res: Response) => {
+  try {
+
+    const apiKey = req.headers['x-api-key'] as string;
+    if (!apiKey) {
+      return res.status(401).json({ error: 'Acceso denegado: API Key faltante' });
+    }
+
+    const device = await prisma.device.findUnique({
+      where: { apiKey }
+    });
+
+    if (!device) {
+      return res.status(403).json({ error: 'Cajero no autorizado o API Key inválida' });
+    }
+
+    const { logData } = req.body;
+
+    if (!logData) {
+      return res.status(400).json({ error: 'Estructura JSON inválida. Falta logData.' });
+    }
+
+    console.log("=== DATOS RECIBIDOS DESDE C++ ===");
+    console.log(logData);
+    console.log("Tipo de dato de la fecha:", typeof logData.fecha, "- Valor:", logData.fecha);
+
+    let fechaString = String(logData.fecha);
+
+    fechaString = fechaString.replace(/\.(\d{3})\d+/, '.$1');
+    fechaString = fechaString.replace(/([+-]\d{2})$/, '$1:00');
+
+    let fechaLog = new Date(fechaString);
+
+    if (isNaN(fechaLog.getTime())) {
+      console.warn('⚠️ Formato de fecha irreconocible, usando fecha actual:', logData.fecha);
+      fechaLog = new Date();
+    }
+
+    try {
+      const logGuardado = await prisma.log.upsert({
+        where: {
+          uuidCloud: String(logData.uuidCloud)
+        },
+        update: {
+          tipo: String(logData.tipo),
+          descripcion: String(logData.descripcion),
+          ingreso: Number(logData.ingreso),
+          cambio: Number(logData.cambio),
+          total: Number(logData.total),
+          estatus: String(logData.estatus),
+          fecha: fechaLog,
+          idUserLocal: Number(logData.idUserLocal)
+        },
+        create: {
+          deviceId: device.id,
+          uuidCloud: String(logData.uuidCloud),
+          localId: Number(logData.localId),
+          idUserLocal: Number(logData.idUserLocal),
+          tipo: String(logData.tipo),
+          descripcion: String(logData.descripcion),
+          ingreso: Number(logData.ingreso),
+          cambio: Number(logData.cambio),
+          total: Number(logData.total),
+          estatus: String(logData.estatus),
+          fecha: fechaLog,
+        }
+      });
+
+      // Respondemos 200 OK
+      res.status(200).json({ success: true, logId: logGuardado.id });
+
+    } catch (dbError: any) {
+      throw dbError; // Si hay error, lo manda al catch principal
+    }
+
+  } catch (error) {
+    console.error('Error al recibir log del POS:', error);
+    res.status(500).json({ error: 'Error interno del servidor al procesar el log' });
   }
 });
 
