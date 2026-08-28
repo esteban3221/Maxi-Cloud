@@ -627,6 +627,71 @@ app.post('/api/logs', async (req: Request, res: Response) => {
 });
 
 // ==========================================
+// RUTAS DE ACTUALIZACIÓN (OTA PARA C++)
+// ==========================================
+
+app.get('/updates/:channel/:platform/latest.json', async (req: Request, res: Response) => {
+  const { channel, platform } = req.params;
+
+  const latestRelease = await prisma.updateRelease.findFirst({
+    where: { channel, platform },
+    orderBy: [{ major: 'desc' }, { minor: 'desc' }, { patch: 'desc' }, { build: 'desc' }]
+  });
+
+  if (!latestRelease) {
+    res.status(404).json({ error: 'No hay versiones disponibles para este canal' });
+    return;
+  }
+
+  // Responder exactamente con la estructura que tu código en C++ espera
+  res.json({
+    major: latestRelease.major,
+    minor: latestRelease.minor,
+    patch: latestRelease.patch,
+    build: latestRelease.build,
+    url: latestRelease.url
+  });
+
+} catch (error) {
+  console.error('Error al obtener la última versión:', error);
+  res.status(500).json({ error: 'Error interno del servidor al verificar actualizaciones' });
+}
+});
+
+// 2. Ruta protegida para que el Administrador (desde el Dashboard Web) suba o registre una nueva versión
+app.post('/api/updates/publish', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { channel, major, minor, patch, build, url, changelog } = req.body;
+
+    if (!channel || major === undefined || minor === undefined || patch === undefined || build === undefined || !url) {
+      res.status(400).json({ error: 'Faltan campos obligatorios para publicar la actualización' });
+      return;
+    }
+
+    const newRelease = await prisma.updateRelease.create({
+      data: {
+        channel,
+        major: Number(major),
+        minor: Number(minor),
+        patch: Number(patch),
+        build: Number(build),
+        url,
+        changelog
+      }
+    });
+
+    res.status(201).json({
+      message: `Nueva versión para el canal [${channel}] publicada con éxito`,
+      release: newRelease
+    });
+
+  } catch (error) {
+    console.error('Error al publicar actualización:', error);
+    res.status(500).json({ error: 'Error al registrar la nueva versión' });
+  }
+});
+
+// ==========================================
 // INICIO DEL SERVIDOR
 // ==========================================
 const PORT = process.env.PORT || 3000;
