@@ -11,9 +11,9 @@ const app = express();
 app.use(express.json());
 
 const allowedOrigins = [
-  'http://localhost:5173', // Puerto común para Vite / React
-  'http://localhost:3000', // Puerto común para Next.js
-  'http://localhost:8080', // Puerto común para Vue
+  'https://www.maxi-cajero.com:5173', // Puerto común para Vite / React
+  'https://www.maxi-cajero.com:3000', // Puerto común para Next.js
+  'https://www.maxi-cajero.com:8080', // Puerto común para Vue
   process.env.FRONTEND_URL
 ].filter(Boolean) as string[];
 
@@ -358,7 +358,7 @@ app.post('/api/devices/init-pair', (req, res) => {
     expiresAt,
   });
 
-  const frontendUrl = `http://localhost:5173`;
+  const frontendUrl = `https://www.maxi-cajero.com:5173`;
 
   res.json({
     pairingCode,
@@ -705,5 +705,5 @@ const PORT = process.env.PORT || 3000;
 
 
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor listo en http://localhost:${PORT}`);
+  console.log(`🚀 Servidor listo en https://www.maxi-cajero.com:${PORT}`);
 });
