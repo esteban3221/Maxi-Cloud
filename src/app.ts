@@ -11,9 +11,10 @@ const app = express();
 app.use(express.json());
 
 const allowedOrigins = [
-  'https://www.maxi-cajero.com:5173', // Puerto común para Vite / React
-  'https://www.maxi-cajero.com:3000', // Puerto común para Next.js
-  'https://www.maxi-cajero.com:8080', // Puerto común para Vue
+  'https://www.maxi-cajero.com',
+  'https://maxi-cajero.com',
+  'http://localhost:5173',
+  'http://localhost:3000',
   process.env.FRONTEND_URL
 ].filter(Boolean) as string[];
 
