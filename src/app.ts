@@ -359,7 +359,7 @@ app.post('/api/devices/init-pair', (req, res) => {
     expiresAt,
   });
 
-  const frontendUrl = `https://www.maxi-cajero.com:5173`;
+  const frontendUrl = `https://www.maxi-cajero.com`;
 
   res.json({
     pairingCode,
