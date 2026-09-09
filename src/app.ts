@@ -255,6 +255,33 @@ const authenticateJWT = (req: AuthenticatedRequest, res: Response, next: NextFun
   }
 };
 
+// Middleware para verificar si el usuario es Administrador
+const requireAdmin = (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  if (!req.user || req.user.role !== 'ADMIN') {
+    res.status(403).json({ error: 'Acceso denegado: Se requieren privilegios de Administrador' });
+    return;
+  }
+  next();
+};
+
+const SUPER_ADMIN_EMAILS = [
+  'esteban-oe100@hotmail.com',
+];
+
+const requireSuperAdmin = (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  if (!req.user) {
+    res.status(401).json({ error: 'No autenticado' });
+    return;
+  }
+
+  if (!SUPER_ADMIN_EMAILS.includes(req.user.email)) {
+    res.status(403).json({ error: 'Acceso denegado: Esta acción está reservada solo para el propietario.' });
+    return;
+  }
+
+  next();
+};
+
 // ==========================================
 // RUTAS DE AUTENTICACIÓN WEB
 // ==========================================
@@ -666,8 +693,7 @@ app.get('/updates/:channel/:platform/latest.json', async (req: Request, res: Res
   }
 });
 
-// 2. Ruta protegida para que el Administrador (desde el Dashboard Web) suba o registre una nueva versión
-app.post('/api/updates/publish', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/updates/publish', authenticateJWT, requireSuperAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { channel, platform, major, minor, patch, build, url, changelog } = req.body;
 
