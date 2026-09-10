@@ -658,38 +658,49 @@ app.post('/api/logs', async (req: Request, res: Response) => {
 // RUTAS DE ACTUALIZACIÓN (OTA PARA C++)
 // ==========================================
 
-app.get('/updates/:channel/:platform/latest.json', async (req: Request, res: Response) => {
+app.get('/updates/:channel/:platform/latest.json', async (req, res) => {
   try {
-    const { channel: rawChannel, platform: rawPlatform } = req.params;
-    if (typeof rawChannel !== 'string' || typeof rawPlatform !== 'string') {
-      res.status(400).json({ error: 'Parámetros de canal y plataforma inválidos' });
-      return;
-    }
-    const channel = rawChannel;
-    const platform = rawPlatform;
+    const { channel, platform } = req.params;
+    const GITHUB_REPO = 'esteban3221/Maxi-Server-Linux';
 
-    const latestRelease = await prisma.updateRelease.findFirst({
-      where: { channel, platform },
-      orderBy: [{ major: 'desc' }, { minor: 'desc' }, { patch: 'desc' }, { build: 'desc' }]
+    const response = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases`, {
+      headers: { 'Accept': 'application/vnd.github.v3+json' }
     });
 
-    if (!latestRelease) {
+    const releases = await response.json();
+
+    // Filtrar por canal (lts o test)
+    const filteredReleases = releases.filter((ghRelease: any) => {
+      const tagName = (ghRelease.tag_name || '').toLowerCase();
+      const isTest = tagName.includes('test') || tagName.includes('beta') || ghRelease.prerelease;
+      const targetIsTest = channel === 'test';
+      return isTest === targetIsTest;
+    });
+
+    if (filteredReleases.length === 0) {
       res.status(404).json({ error: 'No hay versiones disponibles para este canal' });
       return;
     }
 
-    // Responder exactamente con la estructura que tu código en C++ espera
+    const latest = filteredReleases[0];
+    const tagName = latest.tag_name.replace(/^v/, '');
+    const [versionPart, buildPart] = tagName.split(/[+\-]/);
+    const [major = 0, minor = 0, patch = 0] = versionPart.split('.').map(Number);
+    const build = buildPart ? Number(buildPart) : 1;
+    const asset = latest.assets.find((a: any) => a.name.toLowerCase().includes(platform.replace('-arm', ''))) || latest.assets[0];
+    const downloadUrl = asset ? asset.browser_download_url : latest.html_url;
+
     res.json({
-      major: latestRelease.major,
-      minor: latestRelease.minor,
-      patch: latestRelease.patch,
-      build: latestRelease.build,
-      url: latestRelease.url
+      major,
+      minor,
+      patch,
+      build,
+      url: downloadUrl
     });
 
   } catch (error) {
-    console.error('Error al obtener la última versión:', error);
-    res.status(500).json({ error: 'Error interno del servidor al verificar actualizaciones' });
+    console.error('Error al servir el JSON de actualización:', error);
+    res.status(500).json({ error: 'Error interno al obtener la actualización' });
   }
 });
 
