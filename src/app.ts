@@ -729,26 +729,40 @@ app.get('/api/updates', authenticateJWT, requireSuperAdmin, async (req: Authenti
 
     const response = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases`, {
       headers: {
-        Accept: 'application/vnd.github.v3+json'
+        'Accept': 'application/vnd.github.v3+json'
       }
     });
 
     if (!response.ok) {
-      throw new Error(`GitHub API respondió con ${response.status}`);
+      throw new Error(`GitHub respondió con estado ${response.status}`);
     }
 
-    const githubReleases = await response.json() as Array<any>;
+    const githubReleases = await response.json() as any[];
 
-    let releases = githubReleases.map((ghRelease: any) => ({
-      id: ghRelease.id,
-      version: ghRelease.tag_name,
-      changelog: ghRelease.body,
-      url: ghRelease.assets && ghRelease.assets.length > 0 ? ghRelease.assets[0].browser_download_url : ghRelease.html_url,
-      createdAt: ghRelease.published_at,
-      channel: ghRelease.prerelease ? 'beta' : 'stable',
-      platform: 'linux'
-    }));
+    let releases = githubReleases.map((ghRelease: any) => {
+      const tagName = (ghRelease.tag_name || '').toLowerCase();
+      const releaseName = (ghRelease.name || '').toLowerCase();
 
+      // Detección automática del canal
+      let detectedChannel = 'lts'; // Por defecto es LTS
+      if (tagName.includes('test') || tagName.includes('beta') || releaseName.includes('test') || ghRelease.prerelease) {
+        detectedChannel = 'test';
+      } else if (tagName.includes('lts') || tagName.includes('stable') || releaseName.includes('lts')) {
+        detectedChannel = 'lts';
+      }
+
+      return {
+        id: ghRelease.id,
+        version: ghRelease.tag_name,
+        changelog: ghRelease.body,
+        url: ghRelease.assets.length > 0 ? ghRelease.assets[0].browser_download_url : ghRelease.html_url,
+        createdAt: ghRelease.published_at,
+        channel: detectedChannel,
+        platform: 'linux'
+      };
+    });
+
+    // Aplicar filtros
     if (channel) {
       releases = releases.filter((r: any) => r.channel === String(channel));
     }
