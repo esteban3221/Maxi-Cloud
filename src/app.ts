@@ -722,32 +722,39 @@ app.post('/api/updates/publish', authenticateJWT, requireSuperAdmin, async (req:
   }
 });
 
-app.get('/api/updates', authenticateJWT, requireSuperAdmin, async (req, res) => {
+app.get('/api/updates', authenticateJWT, requireSuperAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const GITHUB_REPO = 'esteban3221/Maxi-Server-Linux';
+    const { channel, platform } = req.query;
 
     const response = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases`, {
       headers: {
-        Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
         Accept: 'application/vnd.github.v3+json'
       }
     });
 
     if (!response.ok) {
-      throw new Error(`GitHub API respondió con estado ${response.status}`);
+      throw new Error(`GitHub API respondió con ${response.status}`);
     }
 
-    const data = await response.json() as Array<any>;
+    const githubReleases = await response.json() as Array<any>;
 
-    const releases = data.map((ghRelease: any) => ({
+    let releases = githubReleases.map((ghRelease: any) => ({
       id: ghRelease.id,
       version: ghRelease.tag_name,
       changelog: ghRelease.body,
-      url: ghRelease.assets?.length > 0 ? ghRelease.assets[0].browser_download_url : ghRelease.html_url,
+      url: ghRelease.assets && ghRelease.assets.length > 0 ? ghRelease.assets[0].browser_download_url : ghRelease.html_url,
       createdAt: ghRelease.published_at,
       channel: ghRelease.prerelease ? 'beta' : 'stable',
-      platform: 'Linux'
+      platform: 'linux'
     }));
+
+    if (channel) {
+      releases = releases.filter((r: any) => r.channel === String(channel));
+    }
+    if (platform) {
+      releases = releases.filter((r: any) => r.platform.toLowerCase() === String(platform).toLowerCase());
+    }
 
     res.status(200).json({ releases });
   } catch (error) {
