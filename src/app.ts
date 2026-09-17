@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { OAuth2Client } from 'google-auth-library';
+import { Prisma } from '@prisma/client';
 
 const app = express();
 app.use(express.json());
@@ -494,10 +495,22 @@ app.post('/api/devices/claim', async (req, res) => {
 // RUTAS PROTEGIDAS PARA DASHBOARD WEB (JWT)
 // ==========================================
 
-// 1. Obtener la lista de todos los cajeros con su total de logs registrados
 app.get('/api/devices', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const userId = req.user?.userId;
+    const role = req.user?.role;
+
+    const whereClause: Prisma.DeviceWhereInput = {};
+
+    if (role !== 'SUPERADMIN') {
+      if (!userId) {
+        return res.status(401).json({ error: 'Usuario no identificado' });
+      }
+      whereClause.userId = userId;
+    }
+
     const devices = await prisma.device.findMany({
+      where: whereClause,
       select: {
         id: true,
         uuid: true,
@@ -506,7 +519,7 @@ app.get('/api/devices', authenticateJWT, async (req: AuthenticatedRequest, res: 
         createdAt: true,
         updatedAt: true,
         _count: {
-          select: { logs: true } // Cuenta cuántos registros ha enviado este cajero
+          select: { logs: true }
         }
       },
       orderBy: { createdAt: 'desc' }
@@ -519,44 +532,41 @@ app.get('/api/devices', authenticateJWT, async (req: AuthenticatedRequest, res: 
   }
 });
 
-
-
 // ==========================================
 // RUTA PARA RECEPCIÓN DE LOGS DESDE EL POS (C++)
 // ==========================================
-app.get('/api/logs', async (req: Request, res: Response) => {
+app.get('/api/logs', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    // 1. Extraer parámetros de paginación de la URL (por defecto página 1, 10 items)
+    const userId = req.user?.userId;
+    const role = req.user?.role;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 10;
     const skip = (page - 1) * limit;
-
-    // 2. Extraer parámetros de los filtros (Cajero, Tipo, Estatus)
     const { deviceId, tipo, estatus } = req.query;
-
-    // 3. Construir el objeto de búsqueda (WHERE) de Prisma dinámicamente
     const where: any = {};
+
     if (deviceId) where.deviceId = String(deviceId);
     if (tipo) where.tipo = String(tipo);
     if (estatus) where.estatus = String(estatus);
+    if (role !== 'SUPERADMIN') {
+      where.device = {
+        userId: userId
+      };
+    }
 
-    // 4. Contar el total de registros para que funcione la paginación en React
     const total = await prisma.log.count({ where });
-
-    // 5. Consultar los logs en la base de datos
     const logs = await prisma.log.findMany({
       where,
       skip,
       take: limit,
-      orderBy: { fecha: 'desc' }, // Los más recientes primero
+      orderBy: { fecha: 'desc' },
       include: {
         device: {
-          select: { name: true, uuid: true } // Traemos el nombre del cajero para la UI
+          select: { name: true, uuid: true }
         }
       }
     });
 
-    // 6. Responder exactamente con la estructura que tu Frontend (LogsResponse) espera
     res.json({
       logs,
       pagination: {
@@ -570,87 +580,6 @@ app.get('/api/logs', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error al consultar los logs:', error);
     res.status(500).json({ error: 'Error interno al obtener el historial de logs' });
-  }
-});
-
-app.post('/api/logs', async (req: Request, res: Response) => {
-  try {
-
-    const apiKey = req.headers['x-api-key'] as string;
-    if (!apiKey) {
-      return res.status(401).json({ error: 'Acceso denegado: API Key faltante' });
-    }
-
-    const device = await prisma.device.findUnique({
-      where: { apiKey }
-    });
-
-    if (!device) {
-      return res.status(403).json({ error: 'Cajero no autorizado o API Key inválida' });
-    }
-
-    const { logData } = req.body;
-
-    if (!logData) {
-      return res.status(400).json({ error: 'Estructura JSON inválida. Falta logData.' });
-    }
-
-    console.log("=== DATOS RECIBIDOS DESDE C++ ===");
-    console.log(logData);
-    console.log("Tipo de dato de la fecha:", typeof logData.fecha, "- Valor:", logData.fecha);
-
-    let fechaString = String(logData.fecha);
-
-    fechaString = fechaString.replace(/\.(\d{3})\d+/, '.$1');
-    fechaString = fechaString.replace(/([+-]\d{2})$/, '$1:00');
-
-    let fechaLog = new Date(fechaString);
-
-    if (isNaN(fechaLog.getTime())) {
-      console.warn('⚠️ Formato de fecha irreconocible, usando fecha actual:', logData.fecha);
-      fechaLog = new Date();
-    }
-
-    try {
-      const logGuardado = await prisma.log.upsert({
-        where: {
-          uuidCloud: String(logData.uuidCloud)
-        },
-        update: {
-          tipo: String(logData.tipo),
-          descripcion: String(logData.descripcion),
-          ingreso: Number(logData.ingreso),
-          cambio: Number(logData.cambio),
-          total: Number(logData.total),
-          estatus: String(logData.estatus),
-          fecha: fechaLog,
-          idUserLocal: Number(logData.idUserLocal)
-        },
-        create: {
-          deviceId: device.id,
-          uuidCloud: String(logData.uuidCloud),
-          localId: Number(logData.localId),
-          idUserLocal: Number(logData.idUserLocal),
-          tipo: String(logData.tipo),
-          descripcion: String(logData.descripcion),
-          ingreso: Number(logData.ingreso),
-          cambio: Number(logData.cambio),
-          total: Number(logData.total),
-          estatus: String(logData.estatus),
-          fecha: fechaLog,
-        }
-      });
-
-      // Respondemos 200 OK
-      res.status(200).json({ success: true, logId: logGuardado.id });
-
-    } catch (dbError: any) {
-      throw dbError; // Si hay error, lo manda al catch principal
-    }
-
-  } catch (error) {
-    console.error('Error al recibir log del POS:', error);
-    res.status(500).json({ error: 'Error interno del servidor al procesar el log' });
   }
 });
 
