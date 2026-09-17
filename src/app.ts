@@ -470,7 +470,8 @@ app.post('/api/devices/claim', async (req, res) => {
         uuid: session.uuid,
         name,
         apiKey: generatedApiKey,
-        active: true
+        active: true,
+        userId: userId
       }
     });
 
