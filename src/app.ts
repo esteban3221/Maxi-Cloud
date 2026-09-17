@@ -425,11 +425,17 @@ app.get('/api/devices/pair-status/:code', (req, res) => {
   res.json({ status: 'PENDING' });
 });
 
-app.post('/api/devices/claim', async (req, res) => {
+app.post('/api/devices/claim', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   try {
     console.log('--- INTENTO DE VINCULACIÓN RECIBIDO ---');
     console.log('Body completo:', req.body);
     console.log('Códigos activos actualmente en memoria:', Array.from(pairingSessions.keys()));
+
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Usuario no autenticado' });
+      return;
+    }
 
     const { pairingCode, name } = req.body;
 
@@ -458,13 +464,14 @@ app.post('/api/devices/claim', async (req, res) => {
     // Generar API Key única para el cajero
     const generatedApiKey = `mc_live_${crypto.randomBytes(24).toString('hex')}`;
 
-    // Crear o actualizar en Prisma
+    // Crear o actualizar en Prisma vinculando el userId
     const device = await prisma.device.upsert({
       where: { uuid: session.uuid },
       update: {
         name,
         apiKey: generatedApiKey,
-        active: true
+        active: true,
+        userId: userId
       },
       create: {
         uuid: session.uuid,
