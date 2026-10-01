@@ -675,89 +675,49 @@ app.get('/api/logs', authenticateJWT, async (req: AuthenticatedRequest, res: Res
 // RUTAS DE ACTUALIZACIÓN (OTA PARA C++)
 // ==========================================
 
-app.get('/api/updates', authenticateJWT, requireSuperAdmin, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/updates/:channel/:platform/latest.json', async (req, res) => {
   try {
+    const { channel, platform } = req.params;
     const GITHUB_REPO = 'esteban3221/Maxi-Server-Linux';
-    const { channel, platform } = req.query;
 
-    const response = await fetch(
-      `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100`,
-      {
-        headers: {
-          'Accept': 'application/vnd.github.v3+json',
-          ...(process.env.GITHUB_TOKEN && {
-            'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
-          }),
-        },
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`GitHub respondió con estado ${response.status}`);
-    }
-
-    const githubReleases = await response.json() as any[];
-
-    const releases = githubReleases.map((ghRelease: any) => {
-      const tagName = (ghRelease.tag_name || '').toLowerCase();
-      const releaseName = (ghRelease.name || '').toLowerCase();
-      const assets = ghRelease.assets || [];
-
-      // Canal: primero prerelease flag, luego heurística por nombre
-      let detectedChannel = 'lts';
-      if (ghRelease.prerelease || /alpha|beta|rc|test|dev/.test(tagName + ' ' + releaseName)) {
-        detectedChannel = 'test';
-      }
-
-      // Plataforma: inferida de los assets
-      let detectedPlatform = 'linux';
-      if (assets.some((a: any) => /win|\.exe$/i.test(a.name))) {
-        detectedPlatform = 'windows';
-      } else if (assets.some((a: any) => /mac|darwin|\.dmg$/i.test(a.name))) {
-        detectedPlatform = 'macos';
-      } else if (assets.some((a: any) => /arm|aarch64/i.test(a.name))) {
-        detectedPlatform = 'linux-arm';
-      }
-
-      // Asset principal: busca el binario esperado
-      const mainAsset =
-        assets.find((a: any) => /Maxicajero-Server-aarch64/i.test(a.name)) ||
-        assets[0];
-
-      return {
-        id: ghRelease.id,
-        tag: ghRelease.tag_name,
-        name: ghRelease.name,
-        version: ghRelease.tag_name,
-        changelog: ghRelease.body,
-        url: mainAsset ? mainAsset.browser_download_url : ghRelease.html_url,
-        assets: assets.map((a: any) => ({
-          name: a.name,
-          url: a.browser_download_url,
-          size: a.size,
-        })),
-        createdAt: ghRelease.published_at,
-        prerelease: ghRelease.prerelease,
-        channel: detectedChannel,
-        platform: detectedPlatform,
-      };
+    const response = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases`, {
+      headers: { 'Accept': 'application/vnd.github.v3+json' }
     });
 
-    // Filtros
-    let filtered = releases;
-    if (channel) {
-      filtered = filtered.filter((r: any) => r.channel === String(channel));
-    }
-    if (platform) {
-      filtered = filtered.filter(
-        (r: any) => r.platform.toLowerCase() === String(platform).toLowerCase()
-      );
+    const releases = await response.json();
+
+    // Filtrar por canal (lts o test)
+    const filteredReleases = releases.filter((ghRelease: any) => {
+      const tagName = (ghRelease.tag_name || '').toLowerCase();
+      const isTest = tagName.includes('test') || tagName.includes('beta') || ghRelease.prerelease;
+      const targetIsTest = channel === 'test';
+      return isTest === targetIsTest;
+    });
+
+    if (filteredReleases.length === 0) {
+      res.status(404).json({ error: 'No hay versiones disponibles para este canal' });
+      return;
     }
 
-    res.status(200).json({ releases: filtered });
+    const latest = filteredReleases[0];
+    const tagName = latest.tag_name.replace(/^v/, '');
+    const [versionPart, buildPart] = tagName.split(/[+\-]/);
+    const [major = 0, minor = 0, patch = 0] = versionPart.split('.').map(Number);
+    const build = buildPart ? Number(buildPart) : 1;
+    const asset = latest.assets.find((a: any) => a.name.toLowerCase().includes(platform.replace('-arm', ''))) || latest.assets[0];
+    const downloadUrl = asset ? asset.browser_download_url : latest.html_url;
+
+    res.json({
+      major,
+      minor,
+      patch,
+      build,
+      url: downloadUrl
+    });
+
   } catch (error) {
-    console.error('Error al conectar con GitHub:', error);
-    res.status(500).json({ error: 'Error al obtener lanzamientos desde GitHub' });
+    console.error('Error al servir el JSON de actualización:', error);
+    res.status(500).json({ error: 'Error interno al obtener la actualización' });
   }
 });
 
