@@ -543,6 +543,86 @@ app.get('/api/devices', authenticateJWT, async (req: AuthenticatedRequest, res: 
 // ==========================================
 // RUTA PARA RECEPCIÓN DE LOGS DESDE EL POS (C++)
 // ==========================================
+app.post('/api/logs', async (req: Request, res: Response) => {
+  try {
+
+    const apiKey = req.headers['x-api-key'] as string;
+    if (!apiKey) {
+      return res.status(401).json({ error: 'Acceso denegado: API Key faltante' });
+    }
+
+    const device = await prisma.device.findUnique({
+      where: { apiKey }
+    });
+
+    if (!device) {
+      return res.status(403).json({ error: 'Cajero no autorizado o API Key inválida' });
+    }
+
+    const { logData } = req.body;
+
+    if (!logData) {
+      return res.status(400).json({ error: 'Estructura JSON inválida. Falta logData.' });
+    }
+
+    console.log("=== DATOS RECIBIDOS DESDE C++ ===");
+    console.log(logData);
+    console.log("Tipo de dato de la fecha:", typeof logData.fecha, "- Valor:", logData.fecha);
+
+    let fechaString = String(logData.fecha);
+
+    fechaString = fechaString.replace(/\.(\d{3})\d+/, '.$1');
+    fechaString = fechaString.replace(/([+-]\d{2})$/, '$1:00');
+
+    let fechaLog = new Date(fechaString);
+
+    if (isNaN(fechaLog.getTime())) {
+      console.warn('⚠️ Formato de fecha irreconocible, usando fecha actual:', logData.fecha);
+      fechaLog = new Date();
+    }
+
+    try {
+      const logGuardado = await prisma.log.upsert({
+        where: {
+          uuidCloud: String(logData.uuidCloud)
+        },
+        update: {
+          tipo: String(logData.tipo),
+          descripcion: String(logData.descripcion),
+          ingreso: Number(logData.ingreso),
+          cambio: Number(logData.cambio),
+          total: Number(logData.total),
+          estatus: String(logData.estatus),
+          fecha: fechaLog,
+          idUserLocal: Number(logData.idUserLocal)
+        },
+        create: {
+          deviceId: device.id,
+          uuidCloud: String(logData.uuidCloud),
+          localId: Number(logData.localId),
+          idUserLocal: Number(logData.idUserLocal),
+          tipo: String(logData.tipo),
+          descripcion: String(logData.descripcion),
+          ingreso: Number(logData.ingreso),
+          cambio: Number(logData.cambio),
+          total: Number(logData.total),
+          estatus: String(logData.estatus),
+          fecha: fechaLog,
+        }
+      });
+
+      // Respondemos 200 OK
+      res.status(200).json({ success: true, logId: logGuardado.id });
+
+    } catch (dbError: any) {
+      throw dbError; // Si hay error, lo manda al catch principal
+    }
+
+  } catch (error) {
+    console.error('Error al recibir log del POS:', error);
+    res.status(500).json({ error: 'Error interno del servidor al procesar el log' });
+  }
+});
 app.get('/api/logs', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user?.userId;
@@ -595,49 +675,89 @@ app.get('/api/logs', authenticateJWT, async (req: AuthenticatedRequest, res: Res
 // RUTAS DE ACTUALIZACIÓN (OTA PARA C++)
 // ==========================================
 
-app.get('/updates/:channel/:platform/latest.json', async (req, res) => {
+app.get('/api/updates', authenticateJWT, requireSuperAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { channel, platform } = req.params;
     const GITHUB_REPO = 'esteban3221/Maxi-Server-Linux';
+    const { channel, platform } = req.query;
 
-    const response = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases`, {
-      headers: { 'Accept': 'application/vnd.github.v3+json' }
-    });
+    const response = await fetch(
+      `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100`,
+      {
+        headers: {
+          'Accept': 'application/vnd.github.v3+json',
+          ...(process.env.GITHUB_TOKEN && {
+            'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
+          }),
+        },
+      }
+    );
 
-    const releases = await response.json();
-
-    // Filtrar por canal (lts o test)
-    const filteredReleases = releases.filter((ghRelease: any) => {
-      const tagName = (ghRelease.tag_name || '').toLowerCase();
-      const isTest = tagName.includes('test') || tagName.includes('beta') || ghRelease.prerelease;
-      const targetIsTest = channel === 'test';
-      return isTest === targetIsTest;
-    });
-
-    if (filteredReleases.length === 0) {
-      res.status(404).json({ error: 'No hay versiones disponibles para este canal' });
-      return;
+    if (!response.ok) {
+      throw new Error(`GitHub respondió con estado ${response.status}`);
     }
 
-    const latest = filteredReleases[0];
-    const tagName = latest.tag_name.replace(/^v/, '');
-    const [versionPart, buildPart] = tagName.split(/[+\-]/);
-    const [major = 0, minor = 0, patch = 0] = versionPart.split('.').map(Number);
-    const build = buildPart ? Number(buildPart) : 1;
-    const asset = latest.assets.find((a: any) => a.name.toLowerCase().includes(platform.replace('-arm', ''))) || latest.assets[0];
-    const downloadUrl = asset ? asset.browser_download_url : latest.html_url;
+    const githubReleases = await response.json() as any[];
 
-    res.json({
-      major,
-      minor,
-      patch,
-      build,
-      url: downloadUrl
+    const releases = githubReleases.map((ghRelease: any) => {
+      const tagName = (ghRelease.tag_name || '').toLowerCase();
+      const releaseName = (ghRelease.name || '').toLowerCase();
+      const assets = ghRelease.assets || [];
+
+      // Canal: primero prerelease flag, luego heurística por nombre
+      let detectedChannel = 'lts';
+      if (ghRelease.prerelease || /alpha|beta|rc|test|dev/.test(tagName + ' ' + releaseName)) {
+        detectedChannel = 'test';
+      }
+
+      // Plataforma: inferida de los assets
+      let detectedPlatform = 'linux';
+      if (assets.some((a: any) => /win|\.exe$/i.test(a.name))) {
+        detectedPlatform = 'windows';
+      } else if (assets.some((a: any) => /mac|darwin|\.dmg$/i.test(a.name))) {
+        detectedPlatform = 'macos';
+      } else if (assets.some((a: any) => /arm|aarch64/i.test(a.name))) {
+        detectedPlatform = 'linux-arm';
+      }
+
+      // Asset principal: busca el binario esperado
+      const mainAsset =
+        assets.find((a: any) => /Maxicajero-Server-aarch64/i.test(a.name)) ||
+        assets[0];
+
+      return {
+        id: ghRelease.id,
+        tag: ghRelease.tag_name,
+        name: ghRelease.name,
+        version: ghRelease.tag_name,
+        changelog: ghRelease.body,
+        url: mainAsset ? mainAsset.browser_download_url : ghRelease.html_url,
+        assets: assets.map((a: any) => ({
+          name: a.name,
+          url: a.browser_download_url,
+          size: a.size,
+        })),
+        createdAt: ghRelease.published_at,
+        prerelease: ghRelease.prerelease,
+        channel: detectedChannel,
+        platform: detectedPlatform,
+      };
     });
 
+    // Filtros
+    let filtered = releases;
+    if (channel) {
+      filtered = filtered.filter((r: any) => r.channel === String(channel));
+    }
+    if (platform) {
+      filtered = filtered.filter(
+        (r: any) => r.platform.toLowerCase() === String(platform).toLowerCase()
+      );
+    }
+
+    res.status(200).json({ releases: filtered });
   } catch (error) {
-    console.error('Error al servir el JSON de actualización:', error);
-    res.status(500).json({ error: 'Error interno al obtener la actualización' });
+    console.error('Error al conectar con GitHub:', error);
+    res.status(500).json({ error: 'Error al obtener lanzamientos desde GitHub' });
   }
 });
 
